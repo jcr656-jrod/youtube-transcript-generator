@@ -1,0 +1,16 @@
+{
+  "name": "YouTube Transcript Generator",
+  "description": "Convert YouTube videos to transcripts, summaries, threads, and SEO metadata",
+  "keywords": ["youtube", "transcript", "ai", "claude", "fastapi"],
+  "services": [
+    {
+      "name": "backend",
+      "image": "Dockerfile.prod",
+      "port": 8000,
+      "environment": {
+        "PORT": 8000
+      },
+      "volumes": []
+    }
+  ]
+}
