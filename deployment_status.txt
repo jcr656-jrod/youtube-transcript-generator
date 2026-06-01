@@ -1,0 +1,2 @@
+DEPLOYMENT_READY=YES
+Status: Ready for Railway.app deployment
