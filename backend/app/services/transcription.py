@@ -1,20 +1,31 @@
 """
 YouTube Transcript Generator - Transcription Service
+Proxy rotation to bypass YouTube IP blocks on cloud servers.
+
+Priority:
+  1. Direct request (sometimes works)
+  2. Webshare proxies (if WEBSHARE_PROXY_USERNAME + WEBSHARE_PROXY_PASSWORD set)
+  3. Free rotating proxies from proxyscrape API
 """
 
 import re
 import asyncio
-import subprocess
 import os
-import shutil
-from pathlib import Path
-from typing import Dict
+import random
+import urllib.request
+from typing import Dict, List, Optional
 
-try:
-    from youtube_transcript_api import YouTubeTranscriptApi
-    YOUTUBE_API_AVAILABLE = True
-except ImportError:
-    YOUTUBE_API_AVAILABLE = False
+from youtube_transcript_api import YouTubeTranscriptApi
+from youtube_transcript_api.proxies import GenericProxyConfig, WebshareProxyConfig
+
+
+PROXY_FETCH_URL = (
+    "https://api.proxyscrape.com/v3/free-proxy-list/get"
+    "?request=displayproxies&protocol=http&timeout=5000"
+    "&country=all&ssl=all&anonymity=elite,anonymous&limit=30"
+)
+
+_proxy_cache: List[str] = []
 
 
 def extract_video_id(url: str) -> str:
@@ -28,65 +39,128 @@ def extract_video_id(url: str) -> str:
     raise ValueError(f"Invalid YouTube URL: {url}")
 
 
-async def get_youtube_native_transcript(video_id: str) -> Dict:
-    if not YOUTUBE_API_AVAILABLE:
-        return {"success": False, "method": "youtube_native", "error": "Not installed"}
+def fetch_free_proxies() -> List[str]:
+    global _proxy_cache
     try:
-        print(f"  [Method 1] Native captions for {video_id}...")
-        transcript_list = YouTubeTranscriptApi.list_transcripts(video_id)
+        req = urllib.request.urlopen(PROXY_FETCH_URL, timeout=8)
+        proxies = [p.strip() for p in req.read().decode().strip().split("\n") if p.strip()]
+        random.shuffle(proxies)
+        _proxy_cache = proxies
+        print(f"  [Proxy] Fetched {len(proxies)} free proxies")
+        return proxies
+    except Exception as e:
+        print(f"  [Proxy] Could not fetch proxy list: {e}")
+        return _proxy_cache  # return cached if available
+
+
+def _fetch_transcript(video_id: str, api: YouTubeTranscriptApi) -> Optional[str]:
+    """Attempt to fetch transcript with given api instance."""
+    try:
+        t = api.fetch(video_id, languages=["en", "en-US", "en-GB"])
+        snippets = t.snippets if hasattr(t, "snippets") else t
+        text = " ".join([
+            (s.text if hasattr(s, "text") else s.get("text", ""))
+            for s in snippets
+        ])
+        return text if len(text) > 50 else None
+    except Exception:
+        # Try without language filter
         try:
-            transcript = transcript_list.find_transcript(["en"])
+            t = api.fetch(video_id)
+            snippets = t.snippets if hasattr(t, "snippets") else t
+            text = " ".join([
+                (s.text if hasattr(s, "text") else s.get("text", ""))
+                for s in snippets
+            ])
+            return text if len(text) > 50 else None
         except Exception:
-            transcript = list(transcript_list)[0]
-        entries = transcript.fetch()
-        full_text = " ".join([entry.get("text", "") for entry in entries])
-        print(f"  [Method 1] SUCCESS ({len(full_text)} chars)")
-        return {"success": True, "method": "youtube_native", "text": full_text, "cost": 0.0}
-    except Exception as e:
-        print(f"  [Method 1] FAILED: {str(e)[:100]}")
-        return {"success": False, "method": "youtube_native", "error": str(e)}
+            return None
 
 
-async def get_ytdlp_subtitle_transcript(video_url: str, video_id: str) -> Dict:
+async def get_transcript_with_proxy_rotation(video_id: str) -> Dict:
+    """
+    Try transcript fetching with multiple strategies:
+    1. Direct (no proxy)
+    2. Webshare (if credentials set)
+    3. Free rotating proxies (up to 10 attempts)
+    """
+
+    # --- Strategy 1: Direct ---
+    print(f"  [Method 1] Direct request for {video_id}...")
     try:
-        print(f"  [Method 2] yt-dlp subtitle extraction...")
-        out_dir = f"/tmp/{video_id}"
-        os.makedirs(out_dir, exist_ok=True)
-        cmd = [
-            "yt-dlp",
-            "--skip-download",
-            "--write-auto-sub",
-            "--write-sub",
-            "--sub-lang", "en",
-            "--convert-subs", "srt",
-            "-o", f"{out_dir}/%(id)s.%(ext)s",
-            video_url,
-        ]
-        result = subprocess.run(cmd, capture_output=True, timeout=60, text=True)
-        sub_files = list(Path(out_dir).glob("*.srt")) + list(Path(out_dir).glob("*.vtt"))
-        if not sub_files:
-            return {"success": False, "method": "ytdlp_subs", "error": f"No subs found. {result.stderr[:150]}"}
-        raw = sub_files[0].read_text(encoding="utf-8", errors="ignore")
-        lines = raw.split("\n")
-        text_lines = []
-        for line in lines:
-            line = line.strip()
-            if not line or line.isdigit() or "-->" in line:
-                continue
-            line = re.sub(r"<[^>]+>", "", line)
-            if line:
-                text_lines.append(line)
-        full_text = " ".join(text_lines)
-        shutil.rmtree(out_dir, ignore_errors=True)
-        if len(full_text) < 50:
-            return {"success": False, "method": "ytdlp_subs", "error": "Content too short"}
-        print(f"  [Method 2] SUCCESS ({len(full_text)} chars)")
-        return {"success": True, "method": "ytdlp_subs", "text": full_text, "cost": 0.0}
-    except subprocess.TimeoutExpired:
-        return {"success": False, "method": "ytdlp_subs", "error": "Timeout"}
+        api = YouTubeTranscriptApi()
+        text = _fetch_transcript(video_id, api)
+        if text:
+            print(f"  [Method 1] SUCCESS ({len(text)} chars)")
+            return {"success": True, "method": "direct", "text": text, "cost": 0.0}
+        print("  [Method 1] No text returned")
     except Exception as e:
-        print(f"  [Method 2] FAILED: {str(e)[:100]}")
-        return {"success": False, "method": "ytdlp_subs", "error": str(e)}
+        print(f"  [Method 1] FAILED: {str(e)[:80]}")
+
+    # --- Strategy 2: Webshare (premium, if configured) ---
+    ws_user = os.getenv("WEBSHARE_PROXY_USERNAME")
+    ws_pass = os.getenv("WEBSHARE_PROXY_PASSWORD")
+    if ws_user and ws_pass:
+        print(f"  [Method 2] Webshare proxy...")
+        try:
+            cfg = WebshareProxyConfig(
+                proxy_username=ws_user,
+                proxy_password=ws_pass,
+                retries_when_blocked=3,
+            )
+            api = YouTubeTranscriptApi(proxy_config=cfg)
+            text = _fetch_transcript(video_id, api)
+            if text:
+                print(f"  [Method 2] SUCCESS via Webshare ({len(text)} chars)")
+                return {"success": True, "method": "webshare", "text": text, "cost": 0.0}
+        except Exception as e:
+            print(f"  [Method 2] Webshare FAILED: {str(e)[:80]}")
+    else:
+        print("  [Method 2] Webshare not configured - skipping")
+
+    # --- Strategy 3: Free rotating proxies ---
+    print(f"  [Method 3] Free rotating proxies...")
+    proxies = fetch_free_proxies()
+    if not proxies:
+        return {
+            "success": False,
+            "method": "all_failed",
+            "error": "No proxies available and direct request blocked",
+        }
+
+    attempted = 0
+    for proxy in proxies[:12]:
+        attempted += 1
+        try:
+            cfg = GenericProxyConfig(
+                http_url=f"http://{proxy}",
+                https_url=f"http://{proxy}",
+            )
+            api = YouTubeTranscriptApi(proxy_config=cfg)
+            text = _fetch_transcript(video_id, api)
+            if text:
+                print(f"  [Method 3] SUCCESS via {proxy} ({len(text)} chars)")
+                return {
+                    "success": True,
+                    "method": f"proxy:{proxy}",
+                    "text": text,
+                    "cost": 0.0,
+                }
+        except Exception as e:
+            err = str(e)[:60]
+            print(f"  [Method 3] {proxy} failed: {err}")
+            continue
+
+    return {
+        "success": False,
+        "method": "all_failed",
+        "error": (
+            "Could not retrieve transcript. Video may have no captions, "
+            "or all proxy attempts were blocked. "
+            "Try adding WEBSHARE_PROXY_USERNAME and WEBSHARE_PROXY_PASSWORD "
+            "to your Railway environment variables for more reliable results."
+        ),
+    }
 
 
 async def transcribe_video(video_url: str, timeout: int = 300) -> Dict:
@@ -97,16 +171,4 @@ async def transcribe_video(video_url: str, timeout: int = 300) -> Dict:
     except ValueError as e:
         return {"success": False, "error": str(e), "method": "none"}
 
-    result = await get_youtube_native_transcript(video_id)
-    if result["success"]:
-        return result
-
-    result = await get_ytdlp_subtitle_transcript(video_url, video_id)
-    if result["success"]:
-        return result
-
-    return {
-        "success": False,
-        "error": "Could not transcribe video. The video may have no captions or subtitles available.",
-        "method": "all_failed",
-    }
+    return await get_transcript_with_proxy_rotation(video_id)
