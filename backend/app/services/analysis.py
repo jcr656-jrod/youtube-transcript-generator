@@ -83,7 +83,7 @@ Return ONLY the show notes as markdown text with sections and key points."""
     try:
         # Call Claude
         message = client.messages.create(
-            model="claude-opus",
+            model="claude-haiku-4-5-20251001",
             max_tokens=2000,
             messages=[
                 {"role": "user", "content": prompt}
