@@ -10,17 +10,11 @@ RUN apt-get update && apt-get install -y \
     curl \
     && rm -rf /var/lib/apt/lists/*
 
-# Copy backend requirements
-COPY backend/requirements.txt ./backend/
+# Copy entire project
+COPY . .
 
-# Install Python dependencies
+# Install Python dependencies from backend
 RUN pip install --no-cache-dir -r backend/requirements.txt
-
-# Copy backend code
-COPY backend ./backend/
-
-# Copy frontend (static files)
-COPY frontend ./frontend/
 
 # Set PORT environment variable for Railway.app
 ENV PORT=8000
@@ -29,5 +23,5 @@ ENV PORT=8000
 HEALTHCHECK --interval=30s --timeout=10s --start-period=5s --retries=3 \
     CMD curl -f http://localhost:$PORT/health || exit 1
 
-# Start the application
-CMD ["sh", "-c", "cd backend && python -m uvicorn app:app --host 0.0.0.0 --port $PORT"]
+# Start the application - use absolute path to module
+CMD ["sh", "-c", "cd /app/backend && python -m uvicorn app:app --host 0.0.0.0 --port $PORT"]
