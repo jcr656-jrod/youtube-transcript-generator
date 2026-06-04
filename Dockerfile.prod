@@ -12,9 +12,13 @@ COPY . .
 
 RUN pip install --no-cache-dir -r backend/requirements.txt
 
+# Install yt-dlp globally (latest version, bypasses pip caching issues)
+RUN pip install --no-cache-dir --upgrade yt-dlp
+
 ENV PORT=8000
 
 HEALTHCHECK --interval=30s --timeout=10s --start-period=5s --retries=3 \
     CMD curl -f http://localhost:$PORT/health || exit 1
 
 CMD ["sh", "-c", "cd /app/backend && python -m uvicorn app:app --host 0.0.0.0 --port $PORT"]
+
